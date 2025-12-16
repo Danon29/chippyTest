@@ -44,7 +44,7 @@ func main() {
 		}
 	}
 
-	mux.HandleFunc("GET /healthz", customHandler)
+	mux.HandleFunc("GET api/healthz", customHandler)
 
 	mux.Handle("/app/",
 		apiCfg.middlewareMetricsInc(
@@ -52,8 +52,8 @@ func main() {
 		),
 	)
 
-	mux.HandleFunc("GET /metrics", apiCfg.hitHandler)
-	mux.HandleFunc("POST /reset", apiCfg.resetHandler)
+	mux.HandleFunc("GET api/metrics", apiCfg.hitHandler)
+	mux.HandleFunc("POST api/reset", apiCfg.resetHandler)
 
 	server := http.Server{Addr: ":8080", Handler: mux}
 	log.Fatal(server.ListenAndServe())
