@@ -23,7 +23,10 @@ func (cfg *apiConfig) hitHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(200)
 
-	fmt.Fprintf(w, "Hits: %d", hits)
+	_, err := fmt.Fprintf(w, "Hits: %d", hits)
+	if err != nil {
+		return
+	}
 }
 
 func (cfg *apiConfig) resetHandler(_ http.ResponseWriter, _ *http.Request) {
@@ -44,7 +47,7 @@ func main() {
 		}
 	}
 
-	mux.HandleFunc("GET api/healthz", customHandler)
+	mux.HandleFunc("GET /api/healthz", customHandler)
 
 	mux.Handle("/app/",
 		apiCfg.middlewareMetricsInc(
@@ -52,8 +55,8 @@ func main() {
 		),
 	)
 
-	mux.HandleFunc("GET api/metrics", apiCfg.hitHandler)
-	mux.HandleFunc("POST api/reset", apiCfg.resetHandler)
+	mux.HandleFunc("GET /api/metrics", apiCfg.hitHandler)
+	mux.HandleFunc("POST /api/reset", apiCfg.resetHandler)
 
 	server := http.Server{Addr: ":8080", Handler: mux}
 	log.Fatal(server.ListenAndServe())
