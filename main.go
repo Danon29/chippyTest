@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
 )
 
@@ -53,12 +54,14 @@ func main() {
 			Body string `json:"body"`
 		}
 
+		profaneWords := []string{"kerfuffle", "sharbert", "fornax"}
+
 		type errorResponse struct {
 			Error string `json:"error"`
 		}
 
 		type validResponse struct {
-			Valid bool `json:"valid"`
+			CleanedBody string `json:"cleaned_body"`
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -66,6 +69,17 @@ func main() {
 		var p params
 		decoder := json.NewDecoder(r.Body)
 		err := decoder.Decode(&p)
+
+		loweredBody := strings.ToLower(p.Body)
+
+		for _, value := range profaneWords {
+			if strings.Contains(loweredBody, value) {
+				//changedWord := strings.Repeat("*", len(value))
+				loweredBody = strings.ReplaceAll(loweredBody, value, "****")
+			}
+		}
+
+		result := loweredBody
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(errorResponse{Error: "Something went wrong"})
@@ -79,7 +93,7 @@ func main() {
 		}
 
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(validResponse{Valid: true})
+		json.NewEncoder(w).Encode(validResponse{CleanedBody: result})
 	}
 
 	mux.HandleFunc("GET /api/healthz", customHandler)
