@@ -35,6 +35,28 @@ func (cfg *apiConfig) resetHandler(_ http.ResponseWriter, _ *http.Request) {
 	cfg.fileserverHits.Store(0)
 }
 
+func censor(body string, profane []string) string {
+	lowered := strings.ToLower(body)
+	result := body
+
+	for _, bad := range profane {
+		badLower := strings.ToLower(bad)
+
+		for {
+			idx := strings.Index(lowered, badLower)
+			if idx == -1 {
+				break
+			}
+
+			result = result[:idx] + "****" + result[idx+len(bad):]
+
+			lowered = lowered[:idx] + "****" + lowered[idx+len(bad):]
+		}
+	}
+
+	return result
+}
+
 func main() {
 	mux := http.NewServeMux()
 
@@ -69,17 +91,6 @@ func main() {
 		var p params
 		decoder := json.NewDecoder(r.Body)
 		err := decoder.Decode(&p)
-
-		loweredBody := strings.ToLower(p.Body)
-
-		for _, value := range profaneWords {
-			if strings.Contains(loweredBody, value) {
-				//changedWord := strings.Repeat("*", len(value))
-				loweredBody = strings.ReplaceAll(loweredBody, value, "****")
-			}
-		}
-
-		result := loweredBody
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(errorResponse{Error: "Something went wrong"})
@@ -92,8 +103,10 @@ func main() {
 			return
 		}
 
+		cleaned := censor(p.Body, profaneWords)
+
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(validResponse{CleanedBody: result})
+		json.NewEncoder(w).Encode(validResponse{CleanedBody: cleaned})
 	}
 
 	mux.HandleFunc("GET /api/healthz", customHandler)
