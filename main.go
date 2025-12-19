@@ -1,16 +1,24 @@
 package main
 
 import (
+	"database/sql"
+	"os"
+
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
 	"sync/atomic"
+	_ "github.com/lib/pq"
+	"github.com/joho/godotenv"
+
+	"github.com/danon29/chippy/internal/database"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	DB *database.Queries
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -58,9 +66,25 @@ func censor(body string, profane []string) string {
 }
 
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Fatal("Error loading .env file")
+	}
+
 	mux := http.NewServeMux()
 
-	apiCfg := apiConfig{}
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatal("Error connecting to DB")
+	}
+
+	defer db.Close()
+
+	dbQueries := database.New(db)
+
+	apiCfg := apiConfig{
+		DB: dbQueries,
+	}
 
 	customHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
