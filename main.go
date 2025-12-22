@@ -17,12 +17,14 @@ import (
     "github.com/google/uuid"
 
     "github.com/danon29/chippy/internal/database"
+    "github.com/danon29/chippy/internal/auth"
 )
 
 type apiConfig struct {
     fileserverHits atomic.Int32
     DB             *database.Queries
     platform       string
+    jwtSecret      string
 }
 
 type User struct {
@@ -30,6 +32,7 @@ type User struct {
     CreatedAt time.Time `json:"created_at"`
     UpdatedAt time.Time `json:"updated_at"`
     Email     string    `json:"email"`
+    Token     string    `json:"token"`
 }
 
 type Chirp struct {
@@ -104,6 +107,7 @@ func main() {
     mux := http.NewServeMux()
 
     dbURL := os.Getenv("DB_URL")
+
     db, err := sql.Open("postgres", dbURL)
     if err != nil {
         log.Fatal("Error connecting to DB")
@@ -115,6 +119,7 @@ func main() {
     cfg := apiConfig{
         DB:       dbQueries,
         platform: os.Getenv("PLATFORM"),
+        jwtSecret: os.Getenv("JWT_SECRET"),
     }
 
     customHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +144,6 @@ func main() {
     mux.HandleFunc("GET /api/healthz", customHandler)
 
     mux.HandleFunc("GET /api/chirps", func(w http.ResponseWriter, r *http.Request) {
-
         chirps, err := cfg.DB.GetChirps(r.Context())
         if err != nil {
             http.Error(w, "Error", http.StatusInternalServerError)
@@ -160,10 +164,39 @@ func main() {
         w.WriteHeader(http.StatusOK)
         json.NewEncoder(w).Encode(resp)
     })
+    mux.HandleFunc("GET /api/chirps/{chirpId}", func(w http.ResponseWriter, r *http.Request) {
+        chirpIdStr := r.PathValue("chirpId")
+        if chirpIdStr == "" {
+            http.Error(w, "chirpId is required", http.StatusBadRequest)
+            return
+        }
+
+        chirpID, err := uuid.Parse(chirpIdStr)
+        if err != nil {
+            http.Error(w, "invalid chirpId", http.StatusBadRequest)
+            return
+        }
+
+        chirp, err := cfg.DB.GetChirp(r.Context(), chirpID)
+        if err != nil {
+            http.Error(w, "Name parameter is required", http.StatusNotFound)
+		    return 
+        }
+        
+
+        result := Chirp{
+                ID: chirp.ID,
+                CreatedAt: chirp.CreatedAt,
+                UpdatedAt: chirp.CreatedAt,
+                Body: chirp.Body,
+                UserId: chirp.UserID,
+            }
+        w.WriteHeader(http.StatusOK)
+        json.NewEncoder(w).Encode(result)
+    })
     mux.HandleFunc("POST /api/chirps", func(w http.ResponseWriter, r *http.Request) {
         type params struct {
             Body string `json:"body"`
-            UserId uuid.UUID `json:"user_id"`
         }
 
         profaneWords := []string{"kerfuffle", "sharbert", "fornax"}
@@ -177,11 +210,23 @@ func main() {
             UserId uuid.UUID `json:"user_id"`
         }
 
+        token, err := auth.GetBearerToken(r.Header)
+        if err != nil {
+            http.Error(w, "No valid tokens", http.StatusUnauthorized)
+            return
+        }
+
+        userID, err := auth.ValidateJWT(token, cfg.jwtSecret) 
+        if err != nil || userID == uuid.Nil {
+            http.Error(w, "Invalid token", http.StatusUnauthorized)
+            return
+        }
+
         w.Header().Set("Content-Type", "application/json")
 
         var p params
         decoder := json.NewDecoder(r.Body)
-        err := decoder.Decode(&p)
+        err = decoder.Decode(&p)
         if err != nil {
             w.WriteHeader(http.StatusBadRequest)
             json.NewEncoder(w).Encode(errorResponse{Error: "Something went wrong"})
@@ -198,7 +243,7 @@ func main() {
 
         chirp, err := cfg.DB.CreateChirp(r.Context(), database.CreateChirpParams{
             Body: cleaned,
-            UserID: p.UserId,
+            UserID: userID,
         })
 
         if err != nil {
@@ -207,15 +252,19 @@ func main() {
             return
         }
         w.WriteHeader(http.StatusCreated)
-        json.NewEncoder(w).Encode(validResponse{
-            Body: chirp.Body,
-            UserId: chirp.UserID,
-        })
+        json.NewEncoder(w).Encode(Chirp{
+                ID: chirp.ID,
+                CreatedAt: chirp.CreatedAt,
+                UpdatedAt: chirp.CreatedAt,
+                Body: chirp.Body,
+                UserId: chirp.UserID,
+            })
     })
     
     mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
         type params struct {
             Email string `json:"email"`
+            Password string `json:"password"`
         }
 
         w.Header().Set("Content-Type", "application/json")
@@ -226,7 +275,15 @@ func main() {
             return
         }
 
-        user, err := cfg.DB.CreateUser(r.Context(), p.Email)
+        hashedPassword, err := auth.HashPassword(p.Password)
+        if err != nil {
+            http.Error(w, "Failed to create user", http.StatusInternalServerError)
+            return
+        }
+
+        user, err := cfg.DB.CreateUser(r.Context(), database.CreateUserParams{
+            Email: p.Email, HashedPassword: hashedPassword,
+        })
         if err != nil {
             http.Error(w, "Failed to create user", http.StatusInternalServerError)
             return
@@ -240,6 +297,60 @@ func main() {
 		}
 
         w.WriteHeader(http.StatusCreated)
+        json.NewEncoder(w).Encode(resultUser)
+    })
+
+    mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
+        type params struct {
+            Password string `json:"password"`
+            Email string `json:"email"`
+            ExpiresInSeconds int `json:"expires_in_seconds"`
+        }
+
+        var p params
+        if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+            http.Error(w, "Invalid request", http.StatusBadRequest)
+            return
+        }
+
+        user, err := cfg.DB.FindUser(r.Context(), p.Email)
+       
+
+        isValidPassword, err := auth.CheckPasswordHash(p.Password, user.HashedPassword)
+        if err != nil {
+            http.Error(w, "Unknown error", http.StatusInternalServerError)
+            return
+        }
+
+        if err != nil || !isValidPassword {
+            w.Header().Set("Content-Type", "application/json")
+            w.WriteHeader(http.StatusUnauthorized)
+            json.NewEncoder(w).Encode(struct{ Error string }{"Incorrect email or password"})
+            return
+        }
+
+        var expiresTime time.Duration
+        if p.ExpiresInSeconds == 0 || p.ExpiresInSeconds > 3600 {
+            expiresTime = 3600 * time.Second 
+        } else {
+            expiresTime = time.Duration(p.ExpiresInSeconds) * time.Second
+        }
+
+        token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, expiresTime)
+        if err != nil {
+            http.Error(w, "Unknown error", http.StatusInternalServerError)
+            return
+        }
+
+        resultUser := User{
+			ID: user.ID,
+			CreatedAt: user.CreatedAt,
+			UpdatedAt: user.UpdatedAt,
+			Email: user.Email,
+            Token: token,
+		}
+
+        w.WriteHeader(http.StatusOK)
         json.NewEncoder(w).Encode(resultUser)
     })
 
