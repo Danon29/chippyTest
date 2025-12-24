@@ -33,6 +33,7 @@ type User struct {
     UpdatedAt time.Time `json:"updated_at"`
     Email     string    `json:"email"`
     Token     string    `json:"token"`
+    RefreshToken string `json:"refresh_token"`
 }
 
 type Chirp struct {
@@ -299,12 +300,60 @@ func main() {
         w.WriteHeader(http.StatusCreated)
         json.NewEncoder(w).Encode(resultUser)
     })
+    mux.HandleFunc("PUT /api/users", func(w http.ResponseWriter, r *http.Request) {
+        token, err := auth.GetBearerToken(r.Header)
+        if err != nil {
+            http.Error(w, "No valid tokens", http.StatusUnauthorized)
+            return
+        }
+
+        userID, err := auth.ValidateJWT(token, cfg.jwtSecret) 
+        if err != nil || userID == uuid.Nil {
+            http.Error(w, "Invalid token", http.StatusUnauthorized)
+            return
+        }
+
+        type params struct {
+            Email string `json:"email"`
+            Password string `json:"password"`
+        }
+
+        var p params
+        if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+            http.Error(w, "Invalid request", http.StatusBadRequest)
+            return
+        }
+
+        hashedPassword, err := auth.HashPassword(p.Password)
+        if err != nil {
+            http.Error(w, "Failed to hash password", http.StatusInternalServerError)
+            return
+        }
+
+        updatedUser, err := cfg.DB.UpdateUser(r.Context(), database.UpdateUserParams{
+            ID:             userID,          
+                Email:          p.Email,
+                HashedPassword: hashedPassword,
+        })
+        if err != nil {
+            http.Error(w, "Failed to update user", http.StatusInternalServerError)
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusOK)
+        json.NewEncoder(w).Encode(User{
+            ID:        updatedUser.ID,
+            CreatedAt: updatedUser.CreatedAt,
+            UpdatedAt: updatedUser.UpdatedAt,
+            Email:     updatedUser.Email,
+        })
+    })
 
     mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
         type params struct {
             Password string `json:"password"`
             Email string `json:"email"`
-            ExpiresInSeconds int `json:"expires_in_seconds"`
         }
 
         var p params
@@ -329,16 +378,29 @@ func main() {
             return
         }
 
-        var expiresTime time.Duration
-        if p.ExpiresInSeconds == 0 || p.ExpiresInSeconds > 3600 {
-            expiresTime = 3600 * time.Second 
-        } else {
-            expiresTime = time.Duration(p.ExpiresInSeconds) * time.Second
-        }
-
-        token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, expiresTime)
+        jwtExpiresTime := 1 * time.Hour
+        refreshExpiresTime := 60 * 24 * time.Hour
+       
+        token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, jwtExpiresTime)
         if err != nil {
             http.Error(w, "Unknown error", http.StatusInternalServerError)
+            return
+        }
+
+        refreshToken, err := auth.MakeRefreshToken()
+        if err != nil {
+            http.Error(w, "Failed to create refresh token", http.StatusInternalServerError)
+            return
+        }
+
+        _, err = cfg.DB.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+            Token:     refreshToken,                   
+            UserID:    user.ID,
+            ExpiresAt: time.Now().Add(refreshExpiresTime), 
+            RevokedAt: sql.NullTime{Valid: false},
+        })
+        if err != nil {
+            http.Error(w, "Failed to create refresh token", http.StatusInternalServerError)
             return
         }
 
@@ -348,10 +410,69 @@ func main() {
 			UpdatedAt: user.UpdatedAt,
 			Email: user.Email,
             Token: token,
+            RefreshToken: refreshToken,
 		}
 
         w.WriteHeader(http.StatusOK)
         json.NewEncoder(w).Encode(resultUser)
+    })
+
+    mux.HandleFunc("POST /api/refresh", func(w http.ResponseWriter, r *http.Request) {
+        refreshTokenStr, err := auth.GetBearerToken(r.Header)
+        if err != nil {
+            http.Error(w, "No valid tokens", http.StatusUnauthorized)
+            return
+        }
+
+        refreshToken, err := cfg.DB.GetRefreshToken(r.Context(), refreshTokenStr)
+        if err != nil {
+            http.Error(w, "Invalid refresh token", http.StatusUnauthorized)
+            return
+        }
+
+        if refreshToken.RevokedAt.Valid {
+            http.Error(w, "Refresh token revoked", http.StatusUnauthorized)
+            return
+        }
+
+        if time.Now().After(refreshToken.ExpiresAt) {
+            http.Error(w, "Refresh token expired", http.StatusUnauthorized)
+            return
+        }
+
+        jwtExpiresTime := 1 * time.Hour
+        newAccessToken, err := auth.MakeJWT(refreshToken.UserID, cfg.jwtSecret, jwtExpiresTime)
+        if err != nil {
+            http.Error(w, "Failed to generate access token", http.StatusInternalServerError)
+            return
+        }
+
+        err = cfg.DB.UpdateRefreshToken(r.Context(), refreshTokenStr)
+        if err != nil {
+            http.Error(w, "Failed to update token", http.StatusInternalServerError)
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]string{
+            "token": newAccessToken,  
+        })
+    })
+
+    mux.HandleFunc("POST /api/revoke", func(w http.ResponseWriter, r *http.Request) {
+        token, err := auth.GetBearerToken(r.Header)
+        if err != nil {
+            http.Error(w, "No valid tokens", http.StatusUnauthorized)
+            return
+        }
+
+        err = cfg.DB.RevokeRefreshToken(r.Context(), token)
+        if err != nil {
+            http.Error(w, "Error", http.StatusNotFound)
+            return
+        }
+
+        w.WriteHeader(http.StatusNoContent)
     })
 
     server := http.Server{Addr: ":8080", Handler: mux}
